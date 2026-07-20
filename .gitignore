@@ -1,0 +1,35 @@
+# Compiled output
+output/
+*.o
+*.ko
+*.cmd
+*.mod
+*.mod.c
+*.order
+modules.builtin
+
+# Build artifacts
+*.img
+*.dtb
+*.dtbo
+Image
+Image.gz
+vmlinux
+System.map
+
+# Toolchain
+prebuilts/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

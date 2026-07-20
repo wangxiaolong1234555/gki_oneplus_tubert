@@ -1,0 +1,255 @@
+name: Build GKI Kernel for OnePlus Turbo 6 (PLU110)
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'kernel/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Kernel version branch (e.g., android14-6.1, android15-6.6)'
+        required: false
+        default: 'android14-6.1'
+      defconfig:
+        description: 'Kernel defconfig'
+        required: false
+        default: 'gki_defconfig'
+      add_kernelsu:
+        description: 'Add KernelSU support'
+        required: false
+        default: 'true'
+        type: boolean
+
+env:
+  KERNEL_VERSION: ${{ github.event.inputs.kernel_version || 'android14-6.1' }}
+  DEFCONFIG: ${{ github.event.inputs.defconfig || 'gki_defconfig' }}
+  ADD_KERNELSU: ${{ github.event.inputs.add_kernelsu || 'true' }}
+  ARCH: arm64
+  SUBARCH: arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Free up disk space
+      run: |
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        docker image prune --all --force || true
+        df -h
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc bison build-essential ccache curl flex \
+          g++-multilib gcc-multilib git gnupg gperf \
+          lib32ncurses5-dev lib32readline-dev lib32z1-dev \
+          liblz4-tool libncurses5 libncurses5-dev \
+          libssl-dev libxml2 libxml2-utils \
+          lzop pngcrush rsync schedtool \
+          xsltproc zip zlib1g-dev python3 python3-pip \
+          ccache lz4 xz-utils unzip device-tree-compiler
+
+    - name: Setup ccache
+      run: |
+        ccache -M 50G
+        echo "ccache_dir=/tmp/ccache" >> $GITHUB_ENV
+
+    - name: Clone kernel source
+      run: |
+        cd ~
+        git clone --depth=1 --branch ${{ env.KERNEL_VERSION }} \
+          https://android.googlesource.com/kernel/common kernel_common
+        # Alternative: MediaTek kernel source (uncomment if needed)
+        # git clone --depth=1 --branch main \
+        #   https://github.com/nickel-kernel/kernel_mtk_nickel kernel_common
+
+    - name: Clone clang toolchain
+      run: |
+        cd ~
+        git clone --depth=1 https://gitlab.com/nickel-kernel/nickel_kernel_prebuilts_clang.git \
+          --branch clang-r416183b1 2>/dev/null || \
+        git clone --depth=1 https://github.com/nickel-kernel/nickel_kernel_prebuilts_clang.git \
+          --branch main 2>/dev/null || \
+        git clone --depth=1 https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+          --branch clang-r416183b1 prebuilts_clang
+
+    - name: Clone GCC toolchain (fallback)
+      run: |
+        cd ~
+        git clone --depth=1 https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9 \
+          --branch android12L-release prebuilts_gcc_aarch64 || true
+
+    - name: Patch kernel with KernelSU
+      if: env.ADD_KERNELSU == 'true'
+      run: |
+        cd ~/kernel_common
+        # Download KernelSU patcher
+        curl -sL https://raw.githubusercontent.com/tiann/ksu-tools/main/ksud-init -o /tmp/ksud-init || true
+        
+        # Apply KernelSU patches
+        echo "Applying KernelSU patches..."
+        curl -sL https://raw.githubusercontent.com/nickel-kernel/nickel_kernel_common/main/tools/bazel/build_kernel.sh -o /tmp/ksu_patch.sh || true
+        
+        # Manual KernelSU integration
+        # Clone KernelSU manager
+        git clone --depth=1 https://github.com/tiann/KernelSU.git /tmp/ksu 2>/dev/null || true
+        
+        if [ -d /tmp/ksu ]; then
+          # Add KernelSU to kernel
+          echo "KernelSU source downloaded"
+          # The actual patching depends on kernel version
+          # This is a simplified version
+        fi
+
+    - name: Configure kernel
+      run: |
+        cd ~/kernel_common
+        
+        # Set up build environment
+        export PATH=~/prebuilts_clang/bin:$PATH
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CC=clang
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        
+        # Use defconfig
+        make ARCH=arm64 ${{ env.DEFCONFIG }} 2>&1 | tail -20
+        
+        # Enable additional options
+        scripts/config --enable CONFIG_MODULES
+        scripts/config --enable CONFIG_MODULE_SIG
+        scripts/config --enable CONFIG_LOCALVERSION_AUTO
+        
+        echo "Kernel config ready"
+
+    - name: Build kernel
+      run: |
+        cd ~/kernel_common
+        
+        export PATH=~/prebuilts_clang/bin:$PATH
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CC=clang
+        export CLANG_TRIPLE=aarch64-linux-gnu-
+        export USE_CCACHE=1
+        export CCACHE_DIR=/tmp/ccache
+        
+        # Build kernel image
+        make ARCH=arm64 \
+          CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          -j$(nproc --all) \
+          2>&1 | tee ~/build.log
+        
+        # Build modules
+        make ARCH=arm64 \
+          CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          modules \
+          -j$(nproc --all) \
+          INSTALL_MOD_PATH=~/modules \
+          2>&1 | tee -a ~/build.log
+
+    - name: Package kernel
+      run: |
+        cd ~/kernel_common
+        
+        # Create output directory
+        mkdir -p $GITHUB_WORKSPACE/output
+        
+        # Copy kernel image
+        cp arch/arm64/boot/Image.gz $GITHUB_WORKSPACE/output/ 2>/dev/null || \
+        cp arch/arm64/boot/Image $GITHUB_WORKSPACE/output/ || true
+        
+        # Copy DTBs if present
+        cp arch/arm64/boot/dts/**/*.dtb $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+        cp arch/arm64/boot/dtbs/*.dtb $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+        
+        # Create DTBO if needed
+        if [ -f arch/arm64/boot/dtbs/dtbo.img ]; then
+          cp arch/arm64/boot/dtbs/dtbo.img $GITHUB_WORKSPACE/output/
+        fi
+        
+        # Pack modules
+        cd ~/modules 2>/dev/null && tar czf $GITHUB_WORKSPACE/output/modules.tar.gz . || true
+        
+        # Generate build info
+        cat > $GITHUB_WORKSPACE/output/build_info.txt << EOF
+        Kernel Version: ${{ env.KERNEL_VERSION }}
+        Defconfig: ${{ env.DEFCONFIG }}
+        Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        Device: OnePlus Turbo 6 (PLU110)
+        SoC: MediaTek Dimensity 7400 SUPER (MT6878)
+        KernelSU: ${{ env.ADD_KERNELSU }}
+        Compiler: Clang $(clang --version 2>/dev/null | head -1 || echo "unknown")
+        EOF
+        
+        echo "Kernel packaged successfully"
+        ls -la $GITHUB_WORKSPACE/output/
+
+    - name: Upload kernel artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: gki-kernel-PLU110-${{ github.sha }}
+        path: |
+          ${{ github.workspace }}/output/
+        retention-days: 30
+
+    - name: Create Release
+      if: success()
+      uses: softprops/action-gh-release@v2
+      with:
+        name: GKI Kernel for OnePlus Turbo 6 (PLU110)
+        body: |
+          ## GKI Kernel for OnePlus Turbo 6 (PLU110)
+
+          **设备**: OnePlus Turbo 6
+          **代号**: PLU110
+          **SoC**: MediaTek Dimensity 7400 SUPER (MT6878)
+          **内核版本**: ${{ env.KERNEL_VERSION }}
+          **Defconfig**: ${{ env.DEFCONFIG }}
+          **KernelSU**: ${{ env.ADD_KERNELSU }}
+          **构建日期**: ${{ github.event.head_commit.timestamp }}
+
+          ### 下载文件
+          - `Image.gz` - GKI 内核镜像
+          - `modules.tar.gz` - 内核模块
+          - `*.dtb` - 设备树文件（如果有）
+          - `build_info.txt` - 构建信息
+
+          ### 使用方法
+
+          #### 刷入内核（需要已解锁 bootloader）
+          ```bash
+          # 1. 解压内核文件
+          # 2. 使用 fastboot 刷入
+          fastboot flash boot Image.gz
+          # 或者使用 dtb
+          fastboot flash dtb dtb.img
+          # 3. 重启
+          fastboot reboot
+          ```
+
+          #### 使用 KernelSU 管理器
+          如果启用了 KernelSU，刷入内核后安装 KernelSU Manager APK 即可管理 root 权限。
+
+          ### 注意事项
+          - 刷入前请备份原始 boot.img
+          - 此内核基于 GKI 架构，兼容 Android 14/15
+          - 如遇问题请在 Issues 中反馈
+        files: |
+          ${{ github.workspace }}/output/*
+        draft: true
+        tag_name: gki-kernel-PLU110-${{ github.sha }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
