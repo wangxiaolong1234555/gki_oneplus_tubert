@@ -58,6 +58,7 @@ jobs:
           lib32ncurses5-dev lib32readline-dev lib32z1-dev \
           liblz4-tool libncurses5 libncurses5-dev \
           libssl-dev libxml2 libxml2-utils \
+          libelf-dev libc6-dev libelf1 \
           lzop pngcrush rsync schedtool \
           xsltproc zip zlib1g-dev python3 python3-pip \
           ccache lz4 xz-utils unzip device-tree-compiler
